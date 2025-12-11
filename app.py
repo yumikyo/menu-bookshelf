@@ -1,100 +1,119 @@
 import streamlit as st
-import os
 import zipfile
-import shutil
-import tempfile
+import base64
+import json
+import os
+import streamlit.components.v1 as components
 
-st.set_page_config(page_title="Menu Bookshelf", layout="wide", page_icon="📚")
+# ページ設定
+st.set_page_config(page_title="My Menu Book", layout="centered")
 
-# ==========================================
-# UIデザイン
-# ==========================================
-st.title("📚 聴くメニューの本棚")
 st.markdown("""
-お店でダウンロードした**「メニューのZIPファイル」**をここに放り込んでください。
-あなただけのメニューライブラリが作れます。
-""")
+<style>
+    body { font-family: sans-serif; }
+    h1 { color: #ff4b4b; }
+    .stButton button { width: 100%; }
+</style>
+""", unsafe_allow_html=True)
 
-# ==========================================
-# サイドバー：ファイルの取り込み
-# ==========================================
+st.title("🎧 My Menu Book")
+
+# データ管理（メモリ保存）
+if 'my_library' not in st.session_state:
+    st.session_state.my_library = {}
+
+# --- サイドバー：本の追加 ---
 with st.sidebar:
-    st.header("📥 メニューの追加")
-    uploaded_zips = st.file_uploader(
-        "ZIPファイルをアップロード（複数OK）", 
-        type="zip", 
-        accept_multiple_files=True
-    )
-    st.info("※ブラウザを閉じると本棚はリセットされます")
-
-# ==========================================
-# メイン処理：本棚の構築
-# ==========================================
-if not uploaded_zips:
-    st.warning("👈 左のサイドバーから、メニューのZIPファイルを追加してください。")
-    st.stop()
-
-# 一時フォルダに解凍して整理する
-temp_dir = tempfile.mkdtemp()
-shops = {} # お店のリスト
-
-for zip_file in uploaded_zips:
-    # ZIPファイル名をお店の手がかりにする（例: menu_audio_album.zip）
-    # 複数同じ名前だと困るので、アップロード順にIDを振るなどの工夫も可能だが今回はシンプルに
-    shop_name = zip_file.name.replace(".zip", "").replace("menu_audio_album", "新しいお店")
+    st.header("➕ 本の追加")
+    st.info("生成アプリで作ったZIPファイルをここで登録します。")
     
-    # 解凍用のフォルダ作成
-    extract_path = os.path.join(temp_dir, shop_name)
-    os.makedirs(extract_path, exist_ok=True)
+    uploaded_zips = st.file_uploader("ZIPファイルをドロップ", type="zip", accept_multiple_files=True)
     
-    # 解凍実行
-    with zipfile.ZipFile(zip_file, 'r') as zip_ref:
-        zip_ref.extractall(extract_path)
-    
-    # 音声ファイルを探してリスト化
-    audio_files = []
-    for root, dirs, files in os.walk(extract_path):
-        for file in files:
-            if file.endswith(".mp3"):
-                audio_files.append(os.path.join(root, file))
-    
-    # トラック番号順に並べ替え（ファイル名が 01_... となっている前提）
-    audio_files.sort()
-    
-    if audio_files:
-        shops[shop_name] = audio_files
+    if uploaded_zips:
+        for zfile in uploaded_zips:
+            store_name = os.path.splitext(zfile.name)[0].replace("_", " ")
+            st.session_state.my_library[store_name] = zfile
+        st.success(f"{len(uploaded_zips)}冊を追加しました！")
 
-# ==========================================
-# 本棚の表示
-# ==========================================
-st.divider()
+    st.divider()
+    if st.button("🗑️ 本棚を空にする"):
+        st.session_state.my_library = {}
+        st.session_state.selected_shop = None
+        st.rerun()
 
-if not shops:
-    st.error("ZIPファイルの中に音声が見つかりませんでした。")
+# プレイヤー生成関数
+def render_player(shop_name):
+    zfile = st.session_state.my_library[shop_name]
+    playlist_data = []
+
+    try:
+        with zipfile.ZipFile(zfile) as z:
+            file_list = sorted(z.namelist())
+            for f in file_list:
+                if f.endswith(".mp3"):
+                    data = z.read(f)
+                    b64_data = base64.b64encode(data).decode()
+                    title = f.replace(".mp3", "").replace("_", " ")
+                    playlist_data.append({"title": title, "src": f"data:audio/mp3;base64,{b64_data}"})
+    except Exception as e:
+        st.error(f"ファイルの読み込みエラー: {e}"); return
+
+    playlist_json = json.dumps(playlist_data, ensure_ascii=False)
+
+    html_template = """<!DOCTYPE html><html><head><style>
+        .player-container { border: 2px solid #e0e0e0; border-radius: 15px; padding: 20px; background-color: #f9f9f9; text-align: center; }
+        .track-title { font-size: 20px; font-weight: bold; color: #333; margin-bottom: 15px; padding: 10px; background: #fff; border-radius: 8px; border-left: 5px solid #ff4b4b; }
+        .controls { display: flex; gap: 10px; margin: 15px 0; }
+        button { flex: 1; padding: 15px; font-size: 18px; font-weight: bold; color: white; background-color: #ff4b4b; border: none; border-radius: 8px; cursor: pointer; }
+        .track-list { margin-top: 20px; text-align: left; max-height: 250px; overflow-y: auto; border-top: 1px solid #ddd; padding-top: 10px; }
+        .track-item { padding: 10px; border-bottom: 1px solid #eee; cursor: pointer; }
+        .track-item.active { background-color: #ffecec; font-weight: bold; color: #ff4b4b; }
+    </style></head><body>
+    <div class="player-container">
+        <div class="track-title" id="title">Loading...</div>
+        <audio id="audio" controls style="width:100%"></audio>
+        <div class="controls"><button onclick="prev()">⏮</button><button onclick="toggle()" id="pb">▶</button><button onclick="next()">⏭</button></div>
+        <div style="text-align:center; margin-top:10px;">速度: <select id="speed" onchange="spd()"><option value="1.0">1.0</option><option value="1.4" selected>1.4</option><option value="2.0">2.0</option></select></div>
+        <div class="track-list" id="list"></div>
+    </div>
+    <script>
+        const pl = __PLAYLIST__; let idx = 0;
+        const au = document.getElementById('audio'); const ti = document.getElementById('title'); const pb = document.getElementById('play-btn'); const ls = document.getElementById('list');
+        function init() { render(); load(0); spd(); }
+        function load(i) { idx = i; au.src = pl[idx].src; ti.innerText = pl[idx].title; highlight(); spd(); }
+        function toggle() { au.paused ? (au.play(), pb.innerText="⏸") : (au.pause(), pb.innerText="▶"); }
+        function next() { if(idx < pl.length-1) { load(idx+1); au.play(); pb.innerText="⏸"; } }
+        function prev() { if(idx > 0) { load(idx-1); au.play(); pb.innerText="⏸"; } }
+        function spd() { au.playbackRate = parseFloat(document.getElementById('speed').value); }
+        au.onended = function() { idx < pl.length-1 ? next() : pb.innerText="▶"; };
+        function render() { ls.innerHTML = ""; pl.forEach((t, i) => { const d = document.createElement('div'); d.className = "track-item"; d.id = "tr-" + i; d.innerText = (i+1) + ". " + t.title; d.onclick = () => { load(i); au.play(); pb.innerText="⏸"; }; ls.appendChild(d); }); }
+        function highlight() { document.querySelectorAll('.track-item').forEach(e => e.classList.remove('active')); const el = document.getElementById("tr-" + idx); if(el) { el.classList.add('active'); el.scrollIntoView({behavior:'smooth', block:'nearest'}); } }
+        init();
+    </script></body></html>"""
+    
+    st.components.v1.html(html_template.replace("__PLAYLIST__", playlist_json), height=550)
+
+# --- 画面切り替え ---
+if 'selected_shop' not in st.session_state:
+    st.session_state.selected_shop = None
+
+if st.session_state.selected_shop:
+    shop_name = st.session_state.selected_shop
+    st.markdown(f"### 🎧 再生中: {shop_name}")
+    if st.button("⬅️ リストに戻る", use_container_width=True):
+        st.session_state.selected_shop = None
+        st.rerun()
+    st.markdown("---")
+    render_player(shop_name)
 else:
-    # お店を選ぶ（タブにするか、セレクトボックスにするか）
-    # スマホだとセレクトボックスが使いやすい
-    selected_shop = st.selectbox("📖 お店を選択してください", list(shops.keys()))
-    
-    st.header(f"📍 {selected_shop}")
-    
-    # 選ばれたお店のトラックを表示
-    track_list = shops[selected_shop]
-    
-    for audio_path in track_list:
-        # ファイル名からきれいなタイトルを作る
-        # 例: ".../01_はじめに.mp3" -> "01 はじめに"
-        file_name = os.path.basename(audio_path)
-        track_title = file_name.replace(".mp3", "").replace("_", " ")
-        
-        # カード風に表示
-        with st.container():
-            st.markdown(f"**{track_title}**")
-            st.audio(audio_path)
-            st.write("---")
-
-# ==========================================
-# クリーンアップ（終了時）
-# ==========================================
-# Streamlitは再実行のたびに走るので、ここでの削除は難しいが
-# OSの一時フォルダなのでいつかは消える
+    st.markdown("#### 📚 本棚")
+    search_query = st.text_input("🔍 お店を検索", placeholder="例: カフェ")
+    if not st.session_state.my_library:
+        st.info("👈 左のサイドバーにZIPファイルをアップロードしてください。")
+    shop_list = list(st.session_state.my_library.keys())
+    if search_query:
+        shop_list = [name for name in shop_list if search_query in name]
+    for shop_name in shop_list:
+        if st.button(f"📖 {shop_name} を開く", use_container_width=True):
+            st.session_state.selected_shop = shop_name
+            st.rerun()
